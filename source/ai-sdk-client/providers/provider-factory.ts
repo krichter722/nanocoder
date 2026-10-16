@@ -9,9 +9,11 @@ import type {OpenAIProvider} from '@ai-sdk/openai';
 import type {OpenAICompatibleProvider} from '@ai-sdk/openai-compatible';
 import {
 	type Agent,
+	type Dispatcher,
 	type RequestInit as UndiciRequestInit,
 	fetch as undiciFetch,
 } from 'undici';
+import {createProxiedFetch} from '@/ai-sdk-client/proxy-config';
 import {getValidCodexToken} from '@/auth/chatgpt-codex';
 import {
 	COPILOT_HEADERS,
@@ -49,19 +51,44 @@ export type TaggedProvider =
 	| {kind: 'google'; provider: GoogleGenerativeAIProvider};
 
 /**
+ * Resolves the dispatcher for a request URL: the proxy dispatcher when the
+ * host should be routed through the configured proxy, the base dispatcher
+ * (the shared undici Agent carrying TLS/timeout options) otherwise.
+ */
+function dispatcherForUrl(
+	base: Agent,
+	pick: ((url: string) => Dispatcher) | undefined,
+	url: string | URL,
+): Agent | Dispatcher | undefined {
+	if (!pick) {
+		return base;
+	}
+	return pick(typeof url === 'string' ? url : url.href);
+}
+
+/**
  * Wraps undici's fetch so requests flow through the shared Agent. The Agent
  * carries TLS connect options (e.g. caCertPath), so any SDK provider given
  * this fetch will honor the configured CA bundle — even Anthropic and Google,
  * which would otherwise use the global fetch and bypass our TLS settings.
+ * When the proxy environment is configured, remote hosts are routed through
+ * the proxy dispatcher instead (loopback hosts always stay direct).
  */
-export function createUndiciFetch(undiciAgent: Agent) {
+export function createUndiciFetch(
+	undiciAgent: Agent,
+	pickDispatcher?: (url: string) => Dispatcher,
+) {
 	return async (
 		url: string | URL | Request,
 		options?: RequestInit,
 	): Promise<Response> => {
 		const response = await undiciFetch(url as string | URL, {
 			...(options as UndiciRequestInit),
-			dispatcher: undiciAgent,
+			dispatcher: dispatcherForUrl(
+				undiciAgent,
+				pickDispatcher,
+				url as string | URL,
+			),
 		});
 
 		const contentType = response.headers.get('content-type') || '';
@@ -294,6 +321,7 @@ export function createReasoningItemNormalizer(): TransformStream<
 export async function createProvider(
 	providerConfig: AIProviderConfig,
 	undiciAgent: Agent,
+	pickDispatcher?: (url: string) => Dispatcher,
 ): Promise<TaggedProvider> {
 	const logger = getLogger();
 	const {config, sdkProvider} = providerConfig;
@@ -312,7 +340,7 @@ export async function createProvider(
 				baseURL: config.baseURL || undefined,
 				apiKey: config.apiKey ?? '',
 				headers: config.headers,
-				fetch: createUndiciFetch(undiciAgent),
+				fetch: createUndiciFetch(undiciAgent, pickDispatcher),
 			}),
 		};
 	}
@@ -330,7 +358,7 @@ export async function createProvider(
 				baseURL: config.baseURL || undefined,
 				apiKey: config.apiKey ?? '',
 				headers: config.headers,
-				fetch: createUndiciFetch(undiciAgent),
+				fetch: createUndiciFetch(undiciAgent, pickDispatcher),
 			}),
 		};
 	}
@@ -347,6 +375,10 @@ export async function createProvider(
 
 		const domain = credential.enterpriseUrl ?? 'github.com';
 		const baseURL = config.baseURL?.trim() || getCopilotBaseUrl(domain);
+		// Token refreshes must take the same egress route as chat traffic,
+		// otherwise a sandbox whose proxy injects credentials for the token
+		// endpoint breaks auth while the provider requests succeed.
+		const proxiedFetch = createProxiedFetch(undiciAgent);
 
 		const copilotFetch = async (
 			input: string | URL | Request,
@@ -355,6 +387,7 @@ export async function createProvider(
 			const {token} = await getCopilotAccessToken(
 				credential.oauthToken,
 				domain,
+				proxiedFetch,
 			);
 
 			// Build headers via Headers (case-insensitive) to avoid
@@ -391,7 +424,11 @@ export async function createProvider(
 				body: init?.body as UndiciRequestInit['body'],
 				signal: init?.signal,
 				headers,
-				dispatcher: undiciAgent,
+				dispatcher: dispatcherForUrl(
+					undiciAgent,
+					pickDispatcher,
+					input as string | URL,
+				),
 			})) as unknown as Response;
 
 			const contentType = response.headers.get('content-type') || '';
@@ -445,6 +482,7 @@ export async function createProvider(
 				tokens => {
 					updateCodexCredential(providerConfig.name, tokens);
 				},
+				createProxiedFetch(undiciAgent),
 			);
 
 			const h = new Headers();
@@ -489,7 +527,11 @@ export async function createProvider(
 				body: body as UndiciRequestInit['body'],
 				signal: init?.signal,
 				headers,
-				dispatcher: undiciAgent,
+				dispatcher: dispatcherForUrl(
+					undiciAgent,
+					pickDispatcher,
+					input as string | URL,
+				),
 			}) as Promise<Response>;
 		};
 
@@ -536,7 +578,7 @@ export async function createProvider(
 			name: providerConfig.name,
 			baseURL: config.baseURL ?? '',
 			apiKey: config.apiKey ?? 'dummy-key',
-			fetch: createUndiciFetch(undiciAgent),
+			fetch: createUndiciFetch(undiciAgent, pickDispatcher),
 			headers,
 			includeUsage,
 		}),

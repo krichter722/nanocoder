@@ -4,6 +4,7 @@
  */
 
 import {request} from 'undici';
+import {getProxyDispatcher, shouldUseProxy} from '@/ai-sdk-client/proxy-config';
 import {TIMEOUT_HTTP_BODY_MS, TIMEOUT_HTTP_HEADERS_MS} from '@/constants';
 import type {AIProviderConfig, ProviderConfig} from '@/types/config';
 import {formatError} from '@/utils/error-formatter';
@@ -152,6 +153,12 @@ async function fetchModelsData(): Promise<ModelsDevDatabase | null> {
 			method: 'GET',
 			headersTimeout: TIMEOUT_HTTP_HEADERS_MS,
 			bodyTimeout: TIMEOUT_HTTP_BODY_MS,
+			// Route through the configured egress proxy when one is set;
+			// models.dev is never on localhost, so this mirrors the
+			// provider-request behaviour.
+			dispatcher: shouldUseProxy(MODELS_DEV_API_URL)
+				? getProxyDispatcher()
+				: undefined,
 		});
 
 		if (response.statusCode !== 200) {

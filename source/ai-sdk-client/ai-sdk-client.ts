@@ -1,5 +1,6 @@
 import type {LanguageModel} from 'ai';
-import {Agent} from 'undici';
+import {Agent, type Dispatcher} from 'undici';
+import {getProxyDispatcher, shouldUseProxy} from '@/ai-sdk-client/proxy-config';
 import {getPrivacyPreference} from '@/config/preferences';
 import {
 	TIMEOUT_SOCKET_DEFAULT_MS,
@@ -33,6 +34,10 @@ export class AISDKClient implements LLMClient {
 	private availableModels: string[];
 	private providerConfig: AIProviderConfig;
 	private undiciAgent: Agent;
+	// Proxy dispatcher when HTTPS_PROXY/HTTP_PROXY is set (undefined
+	// otherwise); provider requests for remote hosts route through it.
+	private proxyDispatcher: Dispatcher | undefined;
+	private requestDispatcherFor: (url: string) => Dispatcher;
 	private cachedContextSize: number;
 	private maxRetries: number;
 	// Placeholder map for callers that do not supply their own. The TUI hands
@@ -87,6 +92,22 @@ export class AISDKClient implements LLMClient {
 			keepAliveMaxTimeout: connectionPool?.cumulativeMaxIdleTimeout,
 		});
 
+		// Honor the standard proxy environment variables for provider
+		// requests. Without this, undici dispatchers bypass HTTPS_PROXY even
+		// when Node's global fetch (NODE_USE_ENV_PROXY=1) would route through
+		// it — which breaks setups where the proxy is the only egress route.
+		// Loopback hosts (Ollama & co) are never proxied.
+		this.proxyDispatcher = getProxyDispatcher();
+		this.requestDispatcherFor = url =>
+			shouldUseProxy(url)
+				? (this.proxyDispatcher ?? this.undiciAgent)
+				: this.undiciAgent;
+		if (this.proxyDispatcher) {
+			logger.info('Proxy detected, provider requests will use it', {
+				provider: providerConfig.name || 'unknown',
+			});
+		}
+
 		// Fetch context size asynchronously (don't block construction)
 		void this.updateContextSize();
 	}
@@ -117,6 +138,7 @@ export class AISDKClient implements LLMClient {
 		client.provider = await createProvider(
 			client.providerConfig,
 			client.undiciAgent,
+			client.requestDispatcherFor,
 		);
 		return client;
 	}

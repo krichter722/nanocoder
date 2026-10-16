@@ -31,6 +31,8 @@ Custom providers support all [provider configuration fields](index.md#provider-c
 - `includeUsage` - Request streaming token usage metrics (default: `true`). Set to `false` for proxies that reject `stream_options`
 - `caCertPath` - Path to a PEM CA bundle for self-signed or privately issued TLS certificates
 
+Requests to remote providers honor the standard `HTTPS_PROXY`/`HTTP_PROXY`/`NO_PROXY` environment variables (see [Proxy Support](index.md#proxy-support)); loopback endpoints are always reached directly.
+
 ## Setup via Wizard
 
 Select "Custom Provider" in the `/settings providers` wizard to add one interactively. The wizard will prompt for:
