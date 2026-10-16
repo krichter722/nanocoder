@@ -598,6 +598,110 @@ test('createUndiciFetch does not corrupt multi-byte characters split across chun
 	t.is(text, 'data: 👋\n\ndata: [DONE]');
 });
 
+/**
+ * Regression test for the proxy-bypass bug: provider requests must honor
+ * HTTPS_PROXY/HTTP_PROXY instead of connecting directly to the provider.
+ * Uses a real local HTTP server as the proxy so the assertion is on actual
+ * connection routing, not on mocking.
+ */
+test('createUndiciFetch routes requests through the proxy when HTTP_PROXY is set', async t => {
+	const http = await import('node:http');
+	const keys = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+	const saved = new Map(keys.map(k => [k, process.env[k]]));
+	try {
+		for (const k of keys) delete process.env[k];
+
+		const proxyHits: string[] = [];
+		const proxy = http.createServer((req, res) => {
+			proxyHits.push(`${req.method} ${req.url}`);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"via":"proxy"}');
+		});
+		const direct = http.createServer(() => {
+			t.fail('request bypassed the proxy');
+		});
+
+		await new Promise<void>(resolve => proxy.listen(0, '127.0.0.1', resolve));
+		await new Promise<void>(resolve => direct.listen(0, '127.0.0.1', resolve));
+		const proxyPort = (proxy.address() as {port: number}).port;
+		const directPort = (direct.address() as {port: number}).port;
+
+		// example.com resolves to a public IP, so the request leaves the host
+		// through the proxy in absolute-form; a direct hit on the target
+		// server would fail the test.
+		const target = 'http://example.com/v1/chat/completions';
+		process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+
+		const agent = new Agent();
+		const {shouldUseProxy, getProxyDispatcher} = await import(
+			'@/ai-sdk-client/proxy-config'
+		);
+		const fetchFn = createUndiciFetch(agent, url =>
+			shouldUseProxy(url) ? getProxyDispatcher()! : agent,
+		);
+		const response = await fetchFn(target, {method: 'POST'});
+		const body = (await response.json()) as {via?: string};
+
+		t.is(body.via, 'proxy');
+		t.is(proxyHits.length, 1);
+
+		proxy.close();
+		direct.close();
+	} finally {
+		for (const [k, v] of saved) {
+			if (v === undefined) {
+				delete process.env[k];
+			} else {
+				process.env[k] = v;
+			}
+		}
+	}
+});
+
+test('createUndiciFetch sends loopback targets directly even with a proxy set', async t => {
+	const http = await import('node:http');
+	const keys = ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+	const saved = new Map(keys.map(k => [k, process.env[k]]));
+	try {
+		for (const k of keys) delete process.env[k];
+
+		const directHits: string[] = [];
+		const direct = http.createServer((req, res) => {
+			directHits.push(`${req.method} ${req.url}`);
+			res.writeHead(200, {'Content-Type': 'application/json'});
+			res.end('{"via":"direct"}');
+		});
+		await new Promise<void>(resolve => direct.listen(0, '127.0.0.1', resolve));
+		const directPort = (direct.address() as {port: number}).port;
+
+		process.env.HTTP_PROXY = 'http://192.0.2.1:8889'; // unroutable, must not be used
+
+		const agent = new Agent();
+		const {shouldUseProxy} = await import('@/ai-sdk-client/proxy-config');
+		const {getProxyDispatcher} = await import('@/ai-sdk-client/proxy-config');
+		const fetchFn = createUndiciFetch(agent, url =>
+			shouldUseProxy(url) ? getProxyDispatcher()! : agent,
+		);
+		const response = await fetchFn(`http://127.0.0.1:${directPort}/v1/models`, {
+			method: 'GET',
+		});
+		const body = (await response.json()) as {via?: string};
+
+		t.is(body.via, 'direct');
+		t.is(directHits.length, 1);
+		direct.close();
+	} finally {
+		for (const [k, v] of saved) {
+			if (v === undefined) {
+				delete process.env[k];
+			} else {
+				process.env[k] = v;
+			}
+		}
+	}
+});
+
+
 function sseEvent(value: unknown): string {
 	return `data: ${JSON.stringify(value)}\n\n`;
 }

@@ -178,6 +178,33 @@ export NANOCODER_PROVIDERS_FILE=/path/to/providers.json
 
 **Precedence order:** Environment variables > Project `agents.config.json` > Global `agents.config.json`
 
+## Proxy Support
+
+Nanocoder honors the standard proxy environment variables for all provider
+requests (chat traffic, token refreshes and the models.dev metadata lookup):
+
+| Variable | Description |
+|----------|-------------|
+| `HTTPS_PROXY` / `https_proxy` | Proxy for `https://` provider endpoints |
+| `HTTP_PROXY` / `http_proxy` | Proxy for `http://` provider endpoints |
+| `NO_PROXY` / `no_proxy` | Comma-separated hosts that bypass the proxy (`*` disables it entirely) |
+
+```bash
+export HTTPS_PROXY=http://proxy.internal:8889
+export NO_PROXY=localhost,127.0.0.1,.internal.example.com
+```
+
+Notes:
+
+- Providers on `localhost`, `127.0.0.1`, `0.0.0.0` or `[::1]` (Ollama, LM
+  Studio, llama.cpp, ...) are always reached directly, even when a proxy is
+  set.
+- Exact `NO_PROXY` entries match the hostname exactly; entries starting with
+  `.` or `*` match the domain and its subdomains. Entries may carry a `:port`.
+- HTTPS requests are tunneled via `CONNECT`. TLS to the provider is validated
+  as usual — combine with `caCertPath` (or `NODE_EXTRA_CA_CERTS`) when the
+  proxy re-signs traffic.
+
 ## Environment Variable Substitution
 
 API keys and other config values support environment variable substitution:
